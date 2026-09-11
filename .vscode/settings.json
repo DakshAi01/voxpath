@@ -1,0 +1,32 @@
+{
+  // Hide dependency trees from the Explorer. These are 54k+ files that are
+  // already gitignored -- they are never committed, they just make the editor
+  // (and its file counts) look like the project is enormous.
+  "files.exclude": {
+    "**/.venv": true,
+    "**/node_modules": true,
+    "**/.next": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+
+  // Stop the file watcher from following them. This is the setting that
+  // actually reduces CPU/memory, not just visual clutter.
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/node_modules/**": true,
+    "**/.next/**": true,
+    "**/__pycache__/**": true
+  },
+
+  // Keep them out of Ctrl+Shift+F results too.
+  "search.exclude": {
+    "**/.venv": true,
+    "**/node_modules": true,
+    "**/.next": true,
+    "**/package-lock.json": true
+  },
+
+  // Use the project's own virtualenv for Python.
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/Scripts/python.exe"
+}

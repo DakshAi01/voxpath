@@ -1,0 +1,24 @@
+# Web API
+fastapi[all]
+uvicorn
+
+# MCP tool layer.
+# Upper bound is deliberate: 3.x removed FastMCP.get_tools() (see agent.py) and
+# 4.x is another breaking major. Bump only alongside a code review.
+fastmcp>=3,<4
+
+# Chat agent (LangGraph ReAct + OpenAI).
+langgraph>=1,<2
+langchain-core>=1,<2
+langchain-openai>=1,<2
+
+# Crawling, markets, utilities
+python-dotenv
+requests
+beautifulsoup4
+lxml
+yfinance
+pandas
+
+# Tests (test_backend.py, test_units_fast.py)
+pytest

@@ -1,0 +1,33 @@
+# --- Dependencies (match at any depth, not just one hard-coded path) ---
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Build output ---
+.next/
+out/
+*.tsbuildinfo
+build/
+dist/
+
+# --- Caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Runtime artifacts ---
+logs/
+*.log
+backend/data/news/
+*.mp4
+
+# --- OS noise ---
+.DS_Store
+Thumbs.db
