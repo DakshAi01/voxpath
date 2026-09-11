@@ -12,6 +12,11 @@ langgraph>=1,<2
 langchain-core>=1,<2
 langchain-openai>=1,<2
 
+# Conversation persistence (LangGraph Postgres checkpointer + driver).
+# Majors are breaking for both; bump alongside a code review.
+langgraph-checkpoint-postgres>=3,<4
+psycopg[binary,pool]>=3,<4
+
 # Crawling, markets, utilities
 python-dotenv
 requests

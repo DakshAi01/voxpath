@@ -7,12 +7,25 @@ import time
 from dotenv import load_dotenv
 import sys
 import io
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, AsyncExitStack
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.store.postgres.aio import AsyncPostgresStore
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 from logging_config import setup_logging, get_logger, new_trace_id
 from mcp_server import mcp
 import agent
 import news_scheduler
 import services
+
+
+if sys.platform == "win32":
+    # psycopg's async driver cannot run on Windows' default ProactorEventLoop.
+    # Set the policy before any loop exists; asyncio.run() (pytest, TestClient)
+    # honours it. uvicorn needs the extra handling in __main__ below.
+    import asyncio
+
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 if sys.stdout.encoding != "utf-8":
@@ -28,10 +41,55 @@ log = get_logger("voxpath.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Own the app-lifetime resources: the Postgres pool and the news scheduler.
+
+    The connection pool is opened once here and held for the process's life.
+    Opening a connection per request passes every test and then falls over the
+    moment real traffic arrives, so the saver and store are handed this one pool
+    rather than being built with their own from_conn_string() helpers (which
+    open a single bare connection, not a pool).
+    """
     log.info("starting VoxPath API")
-    news_scheduler.start()
-    yield
-    await news_scheduler.stop()
+    async with AsyncExitStack() as stack:
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            import asyncio
+
+            if type(asyncio.get_running_loop()).__name__ == "ProactorEventLoop":
+                raise RuntimeError(
+                    "psycopg async cannot run on Windows' ProactorEventLoop. "
+                    "Start the server via `python main.py` (which selects a "
+                    "SelectorEventLoop) rather than `uvicorn main:app`."
+                )
+            pool = await stack.enter_async_context(
+                AsyncConnectionPool(
+                    database_url,
+                    min_size=int(os.getenv("DB_POOL_MIN_SIZE", "1")),
+                    max_size=int(os.getenv("DB_POOL_MAX_SIZE", "10")),
+                    # Open inside the context manager, not in the constructor.
+                    open=False,
+                    kwargs={
+                        # LangGraph issues its own transactions; an outer one would nest.
+                        "autocommit": True,
+                        # Pooled connections rotate, so server-side prepares don't pay off.
+                        "prepare_threshold": 0,
+                        "row_factory": dict_row,
+                    },
+                )
+            )
+            saver = AsyncPostgresSaver(conn=pool)
+            store = AsyncPostgresStore(conn=pool)
+            # Idempotent DDL: creates the checkpoint/store tables on first boot.
+            await saver.setup()
+            await store.setup()
+            agent.set_persistence(saver, store)
+            log.info("postgres persistence ready (pool max_size=%d)", pool.max_size)
+        else:
+            log.warning("DATABASE_URL not set - running without conversation persistence")
+
+        news_scheduler.start()
+        yield
+        await news_scheduler.stop()
     log.info("VoxPath API stopped")
 
 
@@ -132,7 +190,16 @@ async def chat_endpoint(request: ChatRequest):
 
 
 if __name__ == "__main__":
+    import asyncio
+
     import uvicorn
 
     # log_config=None keeps our logging_config setup instead of uvicorn's defaults.
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_config=None)
+    config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_config=None)
+    server = uvicorn.Server(config)
+    if sys.platform == "win32":
+        # uvicorn builds its loop from a factory hardcoded to ProactorEventLoop on
+        # win32, ignoring the policy set above, so run serve() on our own loop.
+        asyncio.run(server.serve())
+    else:
+        server.run()

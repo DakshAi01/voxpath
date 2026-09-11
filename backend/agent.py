@@ -43,6 +43,24 @@ AGENT_TOOLS = [
 ]
 
 _agent = None
+_saver = None
+_store = None
+
+# All chat turns share one thread until the API grows a session concept; with a
+# checkpointer attached LangGraph requires a thread_id on every invocation.
+DEFAULT_THREAD_ID = "voxpath-default"
+
+
+def set_persistence(saver, store) -> None:
+    """Install the app-lifetime checkpointer and store (called from the lifespan).
+
+    Both are backed by the pool main.py opens at startup, so nothing here owns a
+    connection of its own. Clears the cached agent so it is rebuilt with them.
+    """
+    global _saver, _store, _agent
+    _saver = saver
+    _store = store
+    _agent = None
 
 
 async def _build_agent():
@@ -59,15 +77,22 @@ async def _build_agent():
         )
     llm = services.build_llm()
     log.info("LangGraph agent built with %d MCP tools", len(lc_tools))
-    return create_react_agent(llm, lc_tools, prompt=SYSTEM_PROMPT)
+    return create_react_agent(
+        llm, lc_tools, prompt=SYSTEM_PROMPT, checkpointer=_saver, store=_store
+    )
 
 
-async def agent_chat(message: str) -> str:
+async def agent_chat(message: str, thread_id: str | None = None) -> str:
     """Run one text turn through the LangGraph agent; return the reply text."""
     global _agent
     if _agent is None:
         _agent = await _build_agent()
-    result = await _agent.ainvoke({"messages": [HumanMessage(content=message)]})
+    config = None
+    if _saver is not None:
+        config = {"configurable": {"thread_id": thread_id or DEFAULT_THREAD_ID}}
+    result = await _agent.ainvoke(
+        {"messages": [HumanMessage(content=message)]}, config=config
+    )
     final = result["messages"][-1]
     content = final.content
     return content if isinstance(content, str) else str(content)
