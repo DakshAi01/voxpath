@@ -58,6 +58,20 @@ const INITIAL_WELCOME: Message = {
     '👋 **VoxPath Terminal Active.** Ask me anything about live Indian stock markets, verified news headlines, or IRCTC railway status.',
 };
 
+const MESSAGES_KEY = 'voxpath_chat_messages';
+const THREAD_KEY = 'voxpath_thread_id';
+
+/**
+ * Mint a conversation id. crypto.randomUUID() needs a secure context, which
+ * localhost and https satisfy but a plain-http LAN address does not.
+ */
+function newThreadId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `t-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function ChatContent() {
   const searchParams = useSearchParams();
   const [messages, setMessages] = useState<Message[]>([INITIAL_WELCOME]);
@@ -70,11 +84,31 @@ function ChatContent() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isBusy = useRef(false);
+  const threadIdRef = useRef<string | null>(null);
+
+  // The thread id identifies this browser's conversation; the transcript itself
+  // lives in Postgres behind it. Resolved on first use, not during render.
+  const getThreadId = useCallback(() => {
+    if (threadIdRef.current) return threadIdRef.current;
+    let id: string | null = null;
+    try {
+      id = localStorage.getItem(THREAD_KEY);
+      if (!id) {
+        id = newThreadId();
+        localStorage.setItem(THREAD_KEY, id);
+      }
+    } catch {
+      // Private mode or blocked storage: fall back to a per-tab thread.
+      id = id || newThreadId();
+    }
+    threadIdRef.current = id;
+    return id;
+  }, []);
 
   // Load local storage history on mount
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('voxpath_chat_messages');
+      const saved = localStorage.getItem(MESSAGES_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -90,7 +124,7 @@ function ChatContent() {
   useEffect(() => {
     if (messages.length > 0) {
       try {
-        localStorage.setItem('voxpath_chat_messages', JSON.stringify(messages));
+        localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages));
       } catch {
         // Ignore quota/storage errors
       }
@@ -144,8 +178,12 @@ function ChatContent() {
 
   const clearChat = () => {
     setMessages([INITIAL_WELCOME]);
+    // Emptying the transcript is not enough: without a fresh thread id the
+    // agent still replays the old conversation from Postgres.
+    threadIdRef.current = null;
     try {
-      localStorage.removeItem('voxpath_chat_messages');
+      localStorage.removeItem(MESSAGES_KEY);
+      localStorage.removeItem(THREAD_KEY);
     } catch {
       // Ignore
     }
@@ -169,14 +207,12 @@ function ChatContent() {
 
     try {
       const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000';
-      const historyPayload = messages.map((m) => ({ role: m.role, content: m.content }));
-
       const res = await fetch(`${apiBase}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: textToSend,
-          history: historyPayload,
+          thread_id: getThreadId(),
         }),
       });
 
