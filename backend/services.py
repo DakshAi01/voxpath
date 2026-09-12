@@ -5,7 +5,7 @@ from typing import Any
 import yfinance as yf
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 import news_crawler
 import stock_resolver
@@ -34,6 +34,54 @@ def build_llm() -> BaseChatModel:
         temperature=0,
         max_retries=0,
     )
+
+
+# Dimensions of the default embedding model. The store's vector column is sized
+# from this at setup() time, so changing the model means changing this too and
+# rebuilding the store tables -- the column width cannot be altered in place.
+EMBEDDING_DIMS = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+}
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+def get_embedding_model() -> str:
+    return os.getenv("OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+
+
+def get_embedding_dims() -> int:
+    """Vector width for the configured embedding model.
+
+    Unknown models must declare OPENAI_EMBEDDING_DIMS explicitly rather than
+    silently defaulting, since a wrong width fails at query time, not here.
+    """
+    model = get_embedding_model()
+    override = os.getenv("OPENAI_EMBEDDING_DIMS")
+    if override:
+        return int(override)
+    try:
+        return EMBEDDING_DIMS[model]
+    except KeyError:
+        raise RuntimeError(
+            f"Unknown embedding model {model!r}. Set OPENAI_EMBEDDING_DIMS to its "
+            "vector width, or use one of: " + ", ".join(sorted(EMBEDDING_DIMS))
+        ) from None
+
+
+def build_embeddings() -> OpenAIEmbeddings:
+    """Build the embedding model backing long-term memory search.
+
+    Uses OpenAI, authenticated with OPENAI_API_KEY, same as build_llm(). The
+    model is set by OPENAI_EMBEDDING_MODEL.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Add it to backend/.env to use memory search."
+        )
+    return OpenAIEmbeddings(model=get_embedding_model(), api_key=api_key)
 
 
 def get_market_keywords() -> list[str]:

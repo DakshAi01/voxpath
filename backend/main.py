@@ -79,11 +79,27 @@ async def lifespan(app: FastAPI):
                 )
             )
             saver = AsyncPostgresSaver(conn=pool)
-            store = AsyncPostgresStore(conn=pool)
-            # Idempotent DDL: creates the checkpoint/store tables on first boot.
+            # An index config is what turns the store into a semantic one: without
+            # it every `index` argument to put() is ignored and search falls back
+            # to prefix matching. `fields` is left at its default so the whole
+            # memory document is embedded.
+            store = AsyncPostgresStore(
+                conn=pool,
+                index={
+                    "dims": services.get_embedding_dims(),
+                    "embed": services.build_embeddings(),
+                },
+            )
+            # Idempotent DDL: creates the checkpoint/store tables on first boot,
+            # plus `CREATE EXTENSION vector` and the embedding column for the store.
             await saver.setup()
             await store.setup()
-            log.info("postgres persistence ready (pool max_size=%d)", pool.max_size)
+            log.info(
+                "postgres persistence ready (pool max_size=%d, embeddings=%s/%dd)",
+                pool.max_size,
+                services.get_embedding_model(),
+                services.get_embedding_dims(),
+            )
         else:
             log.warning("DATABASE_URL not set - running without conversation persistence")
 

@@ -168,7 +168,7 @@ def test_mcp_capabilities_include_news_tools():
 def test_chat_endpoint_uses_langgraph_agent(monkeypatch):
     import agent
 
-    async def fake_agent_chat(message: str) -> str:
+    async def fake_agent_chat(message: str, thread_id: str | None = None) -> str:
         assert message == "Hello!"
         return "Agent says hello"
 
