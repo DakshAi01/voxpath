@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 from fastmcp.client import Client
 
+import memory
 import railway
 import services
 
@@ -158,3 +159,29 @@ def check_seat_availability(source: str, destination: str, date: str, train_numb
 @mcp.tool(description="Get class-wise ticket fares for a train between two station codes. Date optional (DD-MM-YYYY).")
 def get_fare(train_number: str, source: str, destination: str, date: str | None = None) -> dict[str, object]:
     return railway.get_fare(train_number, source, destination, date)
+
+
+# --- Long-term memory ------------------------------------------------------
+# These reach the LangGraph store at call time, so they only work inside an
+# agent run, not over the /mcp HTTP mount.
+@mcp.tool(
+    description=(
+        "Remember one durable fact about the user for future conversations "
+        "(a preference, a name, a home station, a recurring interest). Only "
+        "for things still true next week -- never for the answer to the "
+        "current question."
+    )
+)
+async def save_memory(text: str) -> dict[str, str]:
+    return await memory.save_memory(text)
+
+
+@mcp.tool(
+    description=(
+        "Recall facts saved about the user in earlier conversations. Call this "
+        "before answering anything that depends on who the user is or what they "
+        "prefer, and when they refer to something they told you before."
+    )
+)
+async def search_memories(query: str, limit: int = 3) -> dict[str, object]:
+    return await memory.search_memories(query, limit)
