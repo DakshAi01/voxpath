@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI):
     """
     log.info("starting VoxPath API")
     async with AsyncExitStack() as stack:
+        saver = store = None
         database_url = os.getenv("DATABASE_URL")
         if database_url:
             import asyncio
@@ -82,10 +83,13 @@ async def lifespan(app: FastAPI):
             # Idempotent DDL: creates the checkpoint/store tables on first boot.
             await saver.setup()
             await store.setup()
-            agent.set_persistence(saver, store)
             log.info("postgres persistence ready (pool max_size=%d)", pool.max_size)
         else:
             log.warning("DATABASE_URL not set - running without conversation persistence")
+
+        # Build the one agent here, after the pool exists, so every request gets
+        # a fully wired agent and startup fails loudly if it cannot be built.
+        await agent.init_agent(saver, store)
 
         news_scheduler.start()
         yield

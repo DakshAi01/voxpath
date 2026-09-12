@@ -51,16 +51,19 @@ _store = None
 DEFAULT_THREAD_ID = "voxpath-default"
 
 
-def set_persistence(saver, store) -> None:
-    """Install the app-lifetime checkpointer and store (called from the lifespan).
+async def init_agent(saver=None, store=None) -> None:
+    """Build the single app-lifetime agent. Called once from the lifespan.
 
-    Both are backed by the pool main.py opens at startup, so nothing here owns a
-    connection of its own. Clears the cached agent so it is rebuilt with them.
+    Built at startup rather than on the first request so that the checkpointer
+    and store (which do not exist until the pool is open) are always attached,
+    and so a bad API key or a missing MCP tool fails the boot instead of some
+    user's chat message. saver/store are None when DATABASE_URL is unset, which
+    yields a working agent with no conversation memory.
     """
     global _saver, _store, _agent
     _saver = saver
     _store = store
-    _agent = None
+    _agent = await _build_agent()
 
 
 async def _build_agent():
@@ -84,9 +87,10 @@ async def _build_agent():
 
 async def agent_chat(message: str, thread_id: str | None = None) -> str:
     """Run one text turn through the LangGraph agent; return the reply text."""
-    global _agent
     if _agent is None:
-        _agent = await _build_agent()
+        raise RuntimeError(
+            "agent not initialised - init_agent() must run in the app lifespan"
+        )
     config = None
     if _saver is not None:
         config = {"configurable": {"thread_id": thread_id or DEFAULT_THREAD_ID}}
