@@ -128,6 +128,9 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str | None = None
+    # Names the conversation to continue. The checkpointer loads this thread's
+    # history from Postgres, so the client sends an id rather than a transcript.
+    thread_id: str | None = None
 
 
 def is_quota_error(error: Exception) -> bool:
@@ -162,10 +165,14 @@ async def chat_endpoint(request: ChatRequest):
             log.warning("chat request with empty message")
             return JSONResponse(status_code=400, content={"error": "No input"})
 
-        log.info("chat request: %r", user_text[:120])
+        log.info(
+            "chat request on thread %s: %r",
+            request.thread_id or "(default)",
+            user_text[:120],
+        )
 
         try:
-            text_content = await agent.agent_chat(user_text)
+            text_content = await agent.agent_chat(user_text, thread_id=request.thread_id)
         except Exception as routing_error:
             if is_quota_error(routing_error):
                 log.warning("chat hit quota/rate limit, serving fallback: %s", routing_error)
