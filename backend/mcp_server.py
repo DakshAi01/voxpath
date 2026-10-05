@@ -172,7 +172,7 @@ def get_fare(train_number: str, source: str, destination: str, date: str | None 
         "current question."
     )
 )
-async def save_memory(text: str) -> dict[str, str]:
+async def save_memory(text: str) -> dict[str, object]:
     return await memory.save_memory(text)
 
 
@@ -185,3 +185,35 @@ async def save_memory(text: str) -> dict[str, str]:
 )
 async def search_memories(query: str, limit: int = 3) -> dict[str, object]:
     return await memory.search_memories(query, limit)
+
+
+@mcp.tool(
+    description=(
+        "Correct a fact the user has changed, for example a move to a new city "
+        "or a new seat preference. Search first to get the memory id, then call "
+        "this with the new wording. Prefer it over saving a second memory: two "
+        "contradictory facts both come back later."
+    )
+)
+async def update_memory(memory_id: str, text: str) -> dict[str, object]:
+    return await memory.update_memory(memory_id, text)
+
+
+@mcp.tool(
+    description=(
+        "Forget one saved fact, when the user asks you to or when it is no "
+        "longer true and has no replacement. Search first to get the memory id."
+    )
+)
+async def delete_memory(memory_id: str) -> dict[str, object]:
+    return await memory.delete_memory(memory_id)
+
+
+@mcp.tool(
+    description=(
+        "List everything saved about the user, newest first. Use when they ask "
+        "what you remember or know about them."
+    )
+)
+async def list_memories(limit: int = 50) -> dict[str, object]:
+    return await memory.list_memories(limit)

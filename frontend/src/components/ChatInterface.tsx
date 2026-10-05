@@ -11,6 +11,7 @@ import {
   Newspaper,
   TrainTrack,
   Trash2,
+  LogOut,
   HelpCircle,
   AlertCircle,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/utils';
+import { authFetch, API_BASE, type User as AuthUser } from '@/lib/auth';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -72,7 +74,9 @@ function newThreadId(): string {
   return `t-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function ChatContent() {
+type ChatProps = { user: AuthUser; onSignOut: () => void };
+
+function ChatContent({ user, onSignOut }: ChatProps) {
   const searchParams = useSearchParams();
   const [messages, setMessages] = useState<Message[]>([INITIAL_WELCOME]);
   const [isThinking, setIsThinking] = useState(false);
@@ -134,8 +138,7 @@ function ChatContent() {
   // Check backend health
   const checkHealth = useCallback(async () => {
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000';
-      const res = await fetch(`${apiBase}/health`, { signal: AbortSignal.timeout(3000) });
+      const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(3000) });
       setBackendOnline(res.ok);
     } catch {
       setBackendOnline(false);
@@ -206,8 +209,7 @@ function ChatContent() {
     setError(null);
 
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000';
-      const res = await fetch(`${apiBase}/chat`, {
+      const res = await authFetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -218,8 +220,18 @@ function ChatContent() {
 
       const data = await res.json();
 
+      if (res.status === 401) {
+        onSignOut();
+        throw new Error('Your session expired. Please sign in again.');
+      }
+
       if (!res.ok) {
-        const message = typeof data?.error === 'string' ? data.error : 'Backend request failed.';
+        const message =
+          typeof data?.error === 'string'
+            ? data.error
+            : typeof data?.detail === 'string'
+              ? data.detail
+              : 'Backend request failed.';
         throw new Error(message);
       }
 
@@ -288,6 +300,19 @@ function ChatContent() {
               <span className="hidden sm:inline">Clear Chat</span>
             </button>
           )}
+
+          <span className="hidden md:inline max-w-[180px] truncate text-[11px] text-slate-400" title={user.email}>
+            {user.email}
+          </span>
+          <button
+            onClick={onSignOut}
+            aria-label="Sign out"
+            title="Sign out"
+            className="flex items-center gap-1 text-[11px] font-medium text-slate-300 transition-colors hover:text-rose-400"
+          >
+            <LogOut size={13} aria-hidden="true" />
+            <span className="hidden sm:inline">Sign out</span>
+          </button>
         </div>
       </header>
 
@@ -431,7 +456,7 @@ function ChatContent() {
   );
 }
 
-export const ChatInterface = () => {
+export const ChatInterface = ({ user, onSignOut }: ChatProps) => {
   return (
     <Suspense
       fallback={
@@ -441,7 +466,7 @@ export const ChatInterface = () => {
         </div>
       }
     >
-      <ChatContent />
+      <ChatContent user={user} onSignOut={onSignOut} />
     </Suspense>
   );
 };

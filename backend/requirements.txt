@@ -17,6 +17,10 @@ langchain-openai>=1,<2
 langgraph-checkpoint-postgres>=3,<4
 psycopg[binary,pool]>=3,<4
 
+# Auth (local email + password, JWT sessions)
+pyjwt>=2,<3
+bcrypt>=4,<6
+
 # Crawling, markets, utilities
 python-dotenv
 requests

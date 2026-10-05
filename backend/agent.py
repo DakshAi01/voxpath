@@ -10,7 +10,7 @@ from __future__ import annotations
 import inspect
 import os
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import trim_messages
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import create_react_agent
@@ -35,6 +35,11 @@ SYSTEM_PROMPT = (
     "You have long-term memory across conversations: call search_memories "
     "before answering anything that depends on who the user is or what they "
     "prefer, and when they refer to something they told you earlier. Call "
+    "When a fact they told you has CHANGED, search_memories for it and call "
+    "update_memory with its id instead of saving a second memory -- otherwise "
+    "both the old and new versions come back later and contradict each other. "
+    "Use delete_memory when they ask you to forget something, and "
+    "list_memories when they ask what you remember about them. "
     "save_memory when the user states a durable fact about themselves (a "
     "name, a preference, a home station, a standing interest) -- never for "
     "the answer to the current question, and never for live data."
@@ -53,6 +58,9 @@ AGENT_TOOLS = [
     "get_fare",
     "save_memory",
     "search_memories",
+    "update_memory",
+    "delete_memory",
+    "list_memories",
 ]
 
 _agent = None
@@ -64,6 +72,12 @@ _store = None
 # within a few dozen turns. The full history still lives in the checkpointer --
 # only the model's view of it is trimmed.
 MAX_HISTORY_TOKENS = int(os.getenv("MAX_HISTORY_TOKENS", "3000"))
+
+# A single rail or news tool result can exceed the whole history budget on its
+# own, which used to leave trim_messages with nothing to return. Capping the
+# model's view of one tool result keeps the budget workable; the untruncated
+# result stays in the checkpointer.
+MAX_TOOL_CHARS = int(os.getenv("MAX_TOOL_CHARS", "6000"))
 
 # All chat turns share one thread until the API grows a session concept; with a
 # checkpointer attached LangGraph requires a thread_id on every invocation.
@@ -85,6 +99,46 @@ async def init_agent(saver=None, store=None) -> None:
     _agent = await _build_agent()
 
 
+def _cap_tool_messages(messages: list) -> list:
+    """Shorten oversized tool results for the model's view only."""
+    capped = []
+    for message in messages:
+        content = message.content
+        if isinstance(message, ToolMessage) and isinstance(content, str) and len(content) > MAX_TOOL_CHARS:
+            message = message.model_copy(
+                update={"content": content[:MAX_TOOL_CHARS] + "\n...[truncated]"}
+            )
+        capped.append(message)
+    return capped
+
+
+def _drop_orphan_tool_messages(messages: list) -> list:
+    """Remove tool results whose originating tool call is no longer present.
+
+    OpenAI rejects the whole request when a tool message does not follow an
+    assistant message that called it, so an orphan is not a cosmetic problem:
+    it is a 400 for the user.
+    """
+    offered: set[str] = set()
+    kept = []
+    for message in messages:
+        if isinstance(message, AIMessage):
+            offered.update(call["id"] for call in (message.tool_calls or []) if call.get("id"))
+        if isinstance(message, ToolMessage) and message.tool_call_id not in offered:
+            log.warning("dropping orphaned tool message %s", message.tool_call_id)
+            continue
+        kept.append(message)
+    return kept
+
+
+def _last_exchange(messages: list) -> list:
+    """The newest human message onward, which is always a valid request shape."""
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            return messages[index:]
+    return []
+
+
 def _build_pre_model_hook(llm):
     """Trim the thread to a token budget before each model call.
 
@@ -95,8 +149,9 @@ def _build_pre_model_hook(llm):
     """
 
     def trim(state):
+        messages = _cap_tool_messages(state["messages"])
         trimmed = trim_messages(
-            state["messages"],
+            messages,
             max_tokens=MAX_HISTORY_TOKENS,
             token_counter=llm,
             strategy="last",
@@ -105,10 +160,14 @@ def _build_pre_model_hook(llm):
             include_system=True,
             allow_partial=False,
         )
-        # trim_messages can return nothing if a single message blows the budget;
-        # sending an empty list would error, so fall back to the latest turn.
+        # trim_messages returns nothing when even one message blows the budget.
+        # Falling back to the last message alone could hand the model a bare
+        # tool result, which OpenAI rejects; fall back to the last human turn.
         if not trimmed:
-            trimmed = state["messages"][-1:]
+            trimmed = _last_exchange(messages)
+        trimmed = _drop_orphan_tool_messages(trimmed)
+        if not trimmed:
+            trimmed = _last_exchange(messages) or messages[-1:]
         return {"llm_input_messages": trimmed}
 
     return trim
