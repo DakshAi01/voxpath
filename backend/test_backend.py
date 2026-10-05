@@ -167,15 +167,150 @@ def test_mcp_capabilities_include_news_tools():
 
 def test_chat_endpoint_uses_langgraph_agent(monkeypatch):
     import agent
+    import auth
 
-    async def fake_agent_chat(message: str, thread_id: str | None = None) -> str:
+    user = auth.User(id="u1", email="a@example.com")
+
+    async def fake_agent_chat(message: str, thread_id: str | None = None, user_id: str | None = None) -> str:
         assert message == "Hello!"
+        assert user_id == "u1"
         return "Agent says hello"
 
-    monkeypatch.setattr(agent, "agent_chat", fake_agent_chat)
+    async def fake_claim_thread(thread_id, owner):
+        assert owner == user
 
-    client = TestClient(main.app)
-    response = client.post("/chat", json={"message": "Hello!"})
+    monkeypatch.setattr(agent, "agent_chat", fake_agent_chat)
+    monkeypatch.setattr(auth, "claim_thread", fake_claim_thread)
+    main.app.dependency_overrides[auth.current_user] = lambda: user
+    try:
+        client = TestClient(main.app)
+        response = client.post("/chat", json={"message": "Hello!"})
+    finally:
+        main.app.dependency_overrides.clear()
 
     assert response.status_code == 200
     assert response.json() == {"text": "Agent says hello", "audio": None}
+
+
+def test_chat_endpoint_requires_a_token():
+    client = TestClient(main.app)
+    response = client.post("/chat", json={"message": "Hello!"})
+    assert response.status_code == 401
+
+
+def _guarded_echo():
+    import auth
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    from starlette.applications import Starlette
+
+    app = Starlette()
+    app.mount("/mcp", auth.require_token(inner))
+    return TestClient(app)
+
+
+def test_mcp_mount_rejects_missing_and_forged_tokens(monkeypatch):
+    import auth
+
+    monkeypatch.setattr(auth, "JWT_SECRET", "test-secret-" + "x" * 32)
+    client = _guarded_echo()
+    assert client.post("/mcp/").status_code == 401
+    assert client.post("/mcp/", headers={"Authorization": "Bearer nonsense"}).status_code == 401
+
+    forged = auth.jwt.encode({"sub": "u1", "email": "a@example.com"}, "wrong-key-" + "y" * 32, algorithm="HS256")
+    assert client.post("/mcp/", headers={"Authorization": f"Bearer {forged}"}).status_code == 401
+
+
+def test_mcp_mount_accepts_a_valid_token(monkeypatch):
+    import auth
+
+    monkeypatch.setattr(auth, "JWT_SECRET", "test-secret-" + "x" * 32)
+    token = auth.create_token(auth.User(id="u1", email="a@example.com"))
+    client = _guarded_echo()
+    response = client.post("/mcp/", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.text == "ok"
+
+
+def test_real_mcp_mount_is_guarded():
+    client = TestClient(main.app)
+    assert client.post("/mcp/", json={}).status_code == 401
+
+
+def _rail_client(handler):
+    import httpx
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def test_search_trains_queries_every_pair_concurrently(monkeypatch):
+    import railway
+
+    monkeypatch.setenv("RAPIDAPI_KEY", "k")
+    in_flight = peak = 0
+
+    async def handler(request):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        src = request.url.params["source"]
+        # Every pair returns the shared train 12951; only NDLS adds its own.
+        data = [{"trainNumber": "12951", "departure": "16:55", "from": {"code": src}}]
+        if src == "NDLS":
+            data.append({"trainNumber": "22210", "departure": "23:00", "from": {"code": src}})
+        return railway.httpx.Response(200, json={"data": data})
+
+    async def run():
+        async with _rail_client(handler) as client:
+            return await railway.search_trains("delhi", "mumbai", "10-10-2026", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["train_count"] == 2
+    assert [t["train_number"] for t in result["trains"]] == ["12951", "22210"]
+    # De-duplication keeps the first pair in order, not whichever finished first.
+    assert result["trains"][0]["source_station"].endswith("(NDLS)")
+    assert 1 < peak <= railway.SEARCH_CONCURRENCY
+
+
+def test_search_trains_returns_partial_results_at_the_deadline(monkeypatch):
+    import railway
+
+    monkeypatch.setenv("RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(railway, "SEARCH_DEADLINE", 0.2)
+
+    async def handler(request):
+        if request.url.params["source"] != "NDLS":
+            await asyncio.sleep(5)
+        return railway.httpx.Response(200, json={"data": [{"trainNumber": "1", "departure": "01:00"}]})
+
+    async def run():
+        async with _rail_client(handler) as client:
+            return await railway.search_trains("delhi", "CSMT", "10-10-2026", client=client)
+
+    result = asyncio.run(run())
+    assert result["train_count"] == 1
+
+
+def test_search_trains_survives_failing_pairs_and_missing_key(monkeypatch):
+    import railway
+
+    async def handler(request):
+        if request.url.params["source"] == "NDLS":
+            raise railway.httpx.ConnectError("boom")
+        return railway.httpx.Response(500)
+
+    async def run():
+        async with _rail_client(handler) as client:
+            return await railway.search_trains("delhi", "CSMT", "10-10-2026", client=client)
+
+    monkeypatch.delenv("RAPIDAPI_KEY", raising=False)
+    assert "RAPIDAPI_KEY" in asyncio.run(run())["error"]
+
+    monkeypatch.setenv("RAPIDAPI_KEY", "k")
+    assert asyncio.run(run()) == {"error": "No trains found from DELHI to CSMT"}

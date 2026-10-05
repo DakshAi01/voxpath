@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from logging_config import setup_logging, get_logger, new_trace_id
 from mcp_server import mcp
 import agent
+import auth
 import news_scheduler
 import services
 
@@ -88,12 +89,18 @@ async def lifespan(app: FastAPI):
                 index={
                     "dims": services.get_embedding_dims(),
                     "embed": services.build_embeddings(),
+                    # Embed the fact itself and nothing else. Without this the
+                    # whole value is embedded, so the created_at/updated_at
+                    # timestamps dilute the vector: a verbatim restatement
+                    # scored 0.60 instead of 0.79, and deduplication missed it.
+                    "fields": ["text"],
                 },
             )
             # Idempotent DDL: creates the checkpoint/store tables on first boot,
             # plus `CREATE EXTENSION vector` and the embedding column for the store.
             await saver.setup()
             await store.setup()
+            await auth.setup(pool)
             log.info(
                 "postgres persistence ready (pool max_size=%d, embeddings=%s/%dd)",
                 pool.max_size,
@@ -158,6 +165,23 @@ def build_fallback_text(user_text: str | None) -> str:
     return services.build_fallback_text(user_text)
 
 
+@app.post("/auth/register", response_model=auth.TokenResponse)
+async def register_endpoint(creds: auth.Credentials):
+    """Create an account and return a token. Open by design."""
+    return await auth.register(creds)
+
+
+@app.post("/auth/login", response_model=auth.TokenResponse)
+async def login_endpoint(creds: auth.Credentials):
+    return await auth.login(creds)
+
+
+@app.get("/auth/me", response_model=auth.User)
+async def me_endpoint(user: auth.User = Depends(auth.current_user)):
+    """Who the current token belongs to; the client uses it to verify a session."""
+    return user
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -169,11 +193,14 @@ async def news_status():
     return news_scheduler.status()
 
 
-app.mount("/mcp", mcp.http_app(path="/"))
+# The agent calls these tools in-process; this HTTP mount is for external MCP
+# clients. Without the guard it would let anyone run the crawler and spend the
+# OpenAI and railway API quota, bypassing login entirely.
+app.mount("/mcp", auth.require_token(mcp.http_app(path="/")))
 
 
 @app.post("/chat")
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.current_user)):
     try:
         user_text = request.message
 
@@ -181,14 +208,23 @@ async def chat_endpoint(request: ChatRequest):
             log.warning("chat request with empty message")
             return JSONResponse(status_code=400, content={"error": "No input"})
 
+        # The thread id arrives from the browser, so ownership is verified here
+        # rather than trusted: otherwise one account could read another's
+        # conversation simply by sending its id.
+        thread_id = request.thread_id or f"t_{user.id}"
+        await auth.claim_thread(thread_id, user)
+
         log.info(
-            "chat request on thread %s: %r",
-            request.thread_id or "(default)",
+            "chat request from %s on thread %s: %r",
+            user.email,
+            thread_id,
             user_text[:120],
         )
 
         try:
-            text_content = await agent.agent_chat(user_text, thread_id=request.thread_id)
+            text_content = await agent.agent_chat(
+                user_text, thread_id=thread_id, user_id=user.id
+            )
         except Exception as routing_error:
             if is_quota_error(routing_error):
                 log.warning("chat hit quota/rate limit, serving fallback: %s", routing_error)
@@ -211,6 +247,11 @@ async def chat_endpoint(request: ChatRequest):
             }
         )
 
+    except HTTPException:
+        # 401 from the token check and 404 from the ownership check are
+        # deliberate answers, not failures; the catch-all below would turn them
+        # into a 500 and hide why the request was refused.
+        raise
     except Exception as error:
         log.exception("chat endpoint failed: %s", error)
         return JSONResponse(status_code=500, content={"error": str(error)})
