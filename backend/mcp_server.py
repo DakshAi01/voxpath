@@ -80,7 +80,7 @@ def news_sources() -> dict[str, object]:
     return {"sources": services.list_news_sources()}
 
 
-@mcp.tool(description="Run a general chat completion using the configured Vertex AI (Gemini) model")
+@mcp.tool(description="Run a general chat completion using the configured OpenAI chat model")
 def general_chat(message: str) -> dict[str, str]:
     return services.general_chat(message)
 
@@ -147,8 +147,8 @@ def get_train_schedule(train_number: str) -> dict[str, object]:
 
 
 @mcp.tool(description="Find all trains between two stations or cities (accepts station codes or city names). Date optional (DD-MM-YYYY).")
-def search_trains(source: str, destination: str, date: str | None = None) -> dict[str, object]:
-    return railway.search_trains(source, destination, date)
+async def search_trains(source: str, destination: str, date: str | None = None) -> dict[str, object]:
+    return await railway.search_trains(source, destination, date)
 
 
 @mcp.tool(description="Check class-wise seat availability between two station codes on a date (DD-MM-YYYY).")

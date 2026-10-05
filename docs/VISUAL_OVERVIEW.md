@@ -7,6 +7,20 @@ pdf_options:
 
 # VoxPath — Visual Overview
 
+> **⚠️ Out of date.** This document describes an earlier Vertex AI / Gemini
+> version of VoxPath. The current code differs:
+> - The chat agent runs on **OpenAI** (`langchain-openai`, model from
+>   `OPENAI_MODEL`, default `gpt-4o-mini`), not Vertex AI / Gemini.
+> - There is **no voice, image or video** surface: `voice_live.py`,
+>   `image_gen.py`, `check_vertex_live.py` and the Gemini Live / Veo / Nano Banana
+>   integrations no longer exist.
+> - Conversations and long-term memory persist in **Postgres** (LangGraph
+>   checkpointer + pgvector store), and `/chat` and `/mcp` require an
+>   email/password login (JWT).
+>
+> The news, market and railway tool descriptions and the MCP tool layer are still
+> broadly accurate. Treat everything else as historical until this is rewritten.
+
 A set of diagrams that show how VoxPath fits together: the system architecture,
 the shared tool layer, and the main request flows (voice, chat, image→video, news).
 

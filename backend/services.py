@@ -20,8 +20,7 @@ def build_llm() -> BaseChatModel:
     """Build the chat model used by the text agent.
 
     Uses OpenAI, authenticated with OPENAI_API_KEY from the environment. The
-    model is set by OPENAI_MODEL. (The voice, image and video surfaces still
-    use Vertex AI / Veo directly and are unaffected by this.)
+    model is set by OPENAI_MODEL.
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -32,7 +31,8 @@ def build_llm() -> BaseChatModel:
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         api_key=api_key,
         temperature=0,
-        max_retries=0,
+        # Retries transient failures (connection errors, 429, 5xx) with backoff.
+        max_retries=2,
     )
 
 

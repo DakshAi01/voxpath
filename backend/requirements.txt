@@ -24,6 +24,7 @@ bcrypt>=4,<6
 # Crawling, markets, utilities
 python-dotenv
 requests
+httpx
 beautifulsoup4
 lxml
 yfinance

@@ -9,9 +9,12 @@ Requires RAPIDAPI_KEY in the environment.
 
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
 
+import httpx
 import requests
 
 from logging_config import get_logger
@@ -402,41 +405,87 @@ def check_seat_availability(source: str, destination: str, date: str, train_numb
         return {"error": str(error)}
 
 
-def search_trains(source: str, destination: str, date: str | None = None) -> dict:
+# A city search fans out to every station pair (Delhi x Mumbai is 6 x 4 = 24
+# calls). Run them concurrently, but cap the in-flight count so one search does
+# not trip RapidAPI's rate limit, and bound the whole search so a slow upstream
+# costs the user seconds rather than minutes.
+SEARCH_CONCURRENCY = 6
+SEARCH_REQUEST_TIMEOUT = 10
+SEARCH_DEADLINE = 25
+
+
+async def search_trains(
+    source: str,
+    destination: str,
+    date: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
     """Search all trains between two stations/cities (expands major cities)."""
     log.info("search trains: %s->%s", source, destination)
     if not source or not destination:
         return {"error": "Source and destination are required"}
+    try:
+        headers = get_headers()
+    except ValueError as error:
+        return {"error": str(error)}
     source, destination = source.strip().upper(), destination.strip().upper()
     source_stations = CITY_STATION_MAP.get(source, [source])
     dest_stations = CITY_STATION_MAP.get(destination, [destination])
     date = normalize_date(date) or get_default_date()
-    all_trains, searched = [], []
-    for src in source_stations:
-        for dest in dest_stations:
+    pairs = [(src, dest) for src in source_stations for dest in dest_stations]
+    limit = asyncio.Semaphore(SEARCH_CONCURRENCY)
+
+    async def fetch(http: httpx.AsyncClient, src: str, dest: str) -> list | None:
+        async with limit:
             try:
-                r = requests.get(
-                    f"{BASE_URL}/trainAvailability", headers=get_headers(),
-                    params={"source": src, "destination": dest, "date": date}, timeout=20,
+                r = await http.get(
+                    f"{BASE_URL}/trainAvailability", headers=headers,
+                    params={"source": src, "destination": dest, "date": date},
                 )
-                if r.status_code == 200:
-                    searched.append(f"{src} -> {dest}")
-                    for t in r.json().get("data", []):
-                        num = t.get("trainNumber")
-                        if not any(tr["train_number"] == num for tr in all_trains):
-                            all_trains.append({
-                                "train_number": num,
-                                "train_name": t.get("trainName", "N/A"),
-                                "source_station": f"{t.get('from', {}).get('name', 'N/A')} ({t.get('from', {}).get('code', src)})",
-                                "destination_station": f"{t.get('to', {}).get('name', 'N/A')} ({t.get('to', {}).get('code', dest)})",
-                                "departure": t.get("departure", "N/A"),
-                                "arrival": t.get("arrival", "N/A"),
-                                "duration": t.get("duration", "N/A"),
-                                "classes": t.get("allClasses", []),
-                            })
-            except Exception as error:
+            except httpx.HTTPError as error:
                 log.error("search %s->%s error: %s", src, dest, error)
+                return None
+        if r.status_code != 200:
+            log.warning("search %s->%s returned %s", src, dest, r.status_code)
+            return None
+        return r.json().get("data", [])
+
+    async with AsyncExitStack() as stack:
+        if client is None:
+            client = await stack.enter_async_context(
+                httpx.AsyncClient(timeout=SEARCH_REQUEST_TIMEOUT)
+            )
+        tasks = [asyncio.create_task(fetch(client, src, dest)) for src, dest in pairs]
+        done, pending = await asyncio.wait(tasks, timeout=SEARCH_DEADLINE)
+        for task in pending:
+            task.cancel()
+        # Let cancelled requests unwind before the client they use is closed.
+        await asyncio.gather(*pending, return_exceptions=True)
+        if pending:
+            log.warning("search %s->%s: %d of %d station pairs timed out",
+                        source, destination, len(pending), len(pairs))
+
+    # Walk results in pair order so the de-duplication below keeps the same
+    # station names regardless of which request happened to finish first.
+    all_trains, seen = [], set()
+    for (src, dest), task in zip(pairs, tasks):
+        if task not in done or task.exception() is not None or task.result() is None:
+            continue
+        for t in task.result():
+            num = t.get("trainNumber")
+            if num in seen:
                 continue
+            seen.add(num)
+            all_trains.append({
+                "train_number": num,
+                "train_name": t.get("trainName", "N/A"),
+                "source_station": f"{t.get('from', {}).get('name', 'N/A')} ({t.get('from', {}).get('code', src)})",
+                "destination_station": f"{t.get('to', {}).get('name', 'N/A')} ({t.get('to', {}).get('code', dest)})",
+                "departure": t.get("departure", "N/A"),
+                "arrival": t.get("arrival", "N/A"),
+                "duration": t.get("duration", "N/A"),
+                "classes": t.get("allClasses", []),
+            })
     if not all_trains:
         return {"error": f"No trains found from {source} to {destination}"}
     all_trains.sort(key=lambda x: x["departure"])
